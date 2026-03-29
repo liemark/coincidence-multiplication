@@ -1,9 +1,6 @@
 # coincidence-multiplication
 This project explores a class of **non-standard multiplication rules** where numerical products are connected instead of using carry sums, providing a fast solver for this problem.
 ## Problem Description
-Given two integers:  
-A = x · 10^m + y  
-B = b  
 Instead of standard multiplication, we define a "fake product":  
 - Multiply corresponding digits  
 - Concatenate results directly (no carry handling, no zero padding)
