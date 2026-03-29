@@ -32,56 +32,35 @@ Parallelization is used to accelerate the search.
 - Typically completes within **< 1 second** (multi-threaded)
 ## Example Output
 ```
-Starting to compute all coincidence multiplication solutions for n=5, m=3
+Starting to compute all coincidence multiplication solutions for n=4, m=3
 
-Parallel searching for primitive solutions where n=5, m=3 (using 16 threads)...
-Found 21 sets of primitive solutions.
+Parallel searching for primitive solutions where n=4, m=3 (using 16 threads)...
+Found 27 sets of primitive solutions.
 
-Parallel searching for primitive solutions where n=4, m=2 (using 16 threads)...
-Found 0 sets of primitive solutions.
+Parallel searching for primitive solutions where n=3, m=2 (using 16 threads)...
+Found 27 sets of primitive solutions.
 
-Parallel searching for primitive solutions where n=3, m=1 (using 16 threads)...
+Parallel searching for primitive solutions where n=2, m=1 (using 16 threads)...
 Found 0 sets of primitive solutions.
 
 Displaying partial solutions
-A = 10099, B = 991
-A = 30724, B = 997
-A = 20155, B = 997
-A = 50879, B = 997
-A = 10514, B = 994
-A = 15278, B = 994
-A = 18815, B = 995
-A = 12500, B = 996
-A = 10697, B = 986
-A = 90455, B = 999
-A = 12686, B = 989
-A = 72346, B = 999
-A = 54237, B = 999
-A = 36128, B = 999
-A = 18019, B = 999
-A = 57750, B = 998
-A = 10764, B = 988
-A = 45634, B = 998
-A = 53384, B = 998
-A = 33518, B = 998
-A = 41268, B = 998
+A = 1021, B = 981
+……
+A = 9190, B = 990
 
 Solutions that satisfy the no-zero-padding rule:
-    A = 30724, B = 997
-    A = 50879, B = 997
-    A = 15278, B = 994
-    A = 10697, B = 986
-    A = 90455, B = 999
-    A = 12686, B = 989
-    A = 72346, B = 999
-    A = 54237, B = 999
-    A = 10764, B = 988
-    A = 45634, B = 998
-    A = 53384, B = 998
-    A = 41268, B = 998
-Verification completed. Found a total of 12 special solutions.
+    A = 2544, B = 964
+    A = 4524, B = 984
+    A = 1376, B = 924
+    A = 1668, B = 924
+    A = 1655, B = 897
+    A = 1673, B = 888
+    A = 2654, B = 958
+    A = 6343, B = 989
+Verification completed. Found a total of 8 special solutions.
+
 
 Search completed.
-Total time: 0.0097645 seconds.
-Found a total of 21 solution groups.
+Total time: 0.0090884 seconds.
+Found a total of 54 solution groups.
 ```
