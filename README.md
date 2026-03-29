@@ -1,5 +1,5 @@
 # coincidence-multiplication
-This project explores a class of **non-standard multiplication rules** where digit-wise products are concatenated instead of summed with carries.
+This project explores a class of **non-standard multiplication rules** where numerical products are connected instead of using carry sums, providing a fast solver for this problem.
 ## Problem Description
 Given two integers:  
 A = x · 10^m + y  
