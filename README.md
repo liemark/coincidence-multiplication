@@ -11,9 +11,9 @@ Instead of standard multiplication, we define a "fake product":
 164 × 94  
 Digit-wise:  
 - 6 × 9 = 54  
-- 4 × 4 = 16  
+- 4 × 4 = 16
 Constructed result:  
-→ 1 | 54 | 16 = 15416  
+1 | 54 | 16 = 15416  
 Interestingly:  
 164 × 94 = 15416  
 This is a **coincidence** where the fake product equals the true product.
@@ -25,7 +25,7 @@ The algorithm avoids brute force by:
 - Digit-by-digit recursive construction  
 - Carry consistency constraints  
 - Pruning invalid branches early  
-- Final algebraic verification  
+- Final algebraic verification
 Parallelization is used to accelerate the search.
 ## Performance
 - Supports up to 8-digit × 7-digit search  
