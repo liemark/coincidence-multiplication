@@ -1,247 +1,297 @@
-#include <iostream>
-#include <string>
-#include <vector>
-#include <chrono>
 #include <algorithm>
-#include <stdexcept>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
-#include <mutex>
-#include <functional>
-#include <sstream>
-#include <cmath>
+#include <utility>
+#include <vector>
 
-using int_type = long long; // Use long long for speed
+#include <boost/multiprecision/cpp_int.hpp>
 
-struct Context {
-    int n, m;
-    int_type x_min, x_max;
-    int_type power_of_10_m;
-    int_type power_of_10_2m;
-    std::vector<int_type> powers_of_10;
-    std::vector<std::pair<int_type, int_type>> found_pairs; // Each thread will have its own result list
+namespace {
+
+using BigInt = boost::multiprecision::cpp_int;
+
+struct Digits {
+    int y;
+    int b;
 };
 
-void _solve(int k, int_type y, int_type b, int_type carry, Context& context);
-void _final_verification(int_type y_val, int_type b_val, Context& context);
+using DigitChoices = std::array<std::vector<Digits>, 10>;
 
-// Function to find primitive solutions in parallel
-std::vector<std::pair<int_type, int_type>> find_primitive_solutions_parallel(int n, int m, int num_threads) {
-    if (n <= m || m <= 0) return {};
-    std::cout << "\nParallel searching for primitive solutions where n=" << n << ", m=" << m << " (using " << num_threads << " threads)..." << std::endl;
+// The next column depends on the units digits and the carry modulo 10.
+const auto digit_choices = [] {
+    std::array<std::array<DigitChoices, 10>, 10> table;
+    for (int y_units = 0; y_units < 10; ++y_units) {
+        for (int b_units = 0; b_units < 10; ++b_units) {
+            for (int b = 9; b >= 0; --b) {
+                for (int y = 0; y < 10; ++y) {
+                    const int residue = (10 - (y * b_units + b * y_units) % 10) % 10;
+                    table[y_units][b_units][residue].push_back({y, b});
+                }
+            }
+        }
+    }
+    return table;
+}();
 
-    std::vector<std::thread> threads;
-    std::vector<std::pair<int_type, int_type>> final_results;
-    std::mutex results_mutex;
+struct Factors {
+    std::string a;
+    std::string b;
+};
 
-    // Distribute tasks to threads (based on the unit digit of b: 0-9)
-    std::vector<std::vector<int>> work_distribution(num_threads);
-    for (int i = 0; i <= 9; ++i) {
-        work_distribution[i % num_threads].push_back(i);
+struct Results {
+    BigInt padded_count = 0;
+    std::vector<Factors> padded;
+    std::vector<Factors> unpadded;
+
+    void append(Results&& other, std::size_t display_limit) {
+        padded_count += other.padded_count;
+        const auto count = std::min(display_limit - padded.size(), other.padded.size());
+        padded.insert(padded.end(), std::make_move_iterator(other.padded.begin()),
+                      std::make_move_iterator(other.padded.begin() + count));
+        unpadded.insert(unpadded.end(), std::make_move_iterator(other.unpadded.begin()),
+                        std::make_move_iterator(other.unpadded.end()));
+    }
+};
+
+std::string decimal(std::uint64_t value) {
+    return std::to_string(value);
+}
+
+std::string decimal(const BigInt& value) {
+    return value.str();
+}
+
+template <typename Integer>
+class PaddedSearch {
+public:
+    PaddedSearch(int digits, int prefix_digits, int trailing_zeros, std::size_t display_limit)
+        : digits_(digits),
+          powers_(static_cast<std::size_t>(digits) + 1, 1),
+          trailing_zeros_(trailing_zeros, '0'),
+          display_limit_(display_limit) {
+        for (int k = 1; k <= digits_; ++k) {
+            powers_[k] = powers_[k - 1] * 10;
+        }
+        min_prefix_ = powers_[prefix_digits - 1];
+        max_prefix_ = powers_[prefix_digits];
+
+        // For q = 10^m, all cross terms are maximized when both suffixes
+        // are all nines. Their sum is 2(q - 1)(q - 10)/11.
+        // The carry is that sum divided by q, so x * gap <= floor((2q - 22)/11).
+        max_gap_ = (2 * powers_.back() - 22) / 11 / min_prefix_;
     }
 
-    // Worker function for each thread
-    auto worker = [&](const std::vector<int>& assigned_b_digits) {
-        Context context;
-        context.n = n; context.m = m;
-        context.x_min = (n > m) ? static_cast<int_type>(pow(10, n - m - 1)) : 0;
-        context.x_max = static_cast<int_type>(pow(10, n - m));
-        context.power_of_10_m = static_cast<int_type>(pow(10, m));
-        context.power_of_10_2m = static_cast<int_type>(pow(10, 2 * m));
-        for (int i = 0; i <= 2 * m; ++i) {
-            context.powers_of_10.push_back(static_cast<int_type>(pow(10, i)));
-        }
-
-        // Thread only processes its assigned b_digit
-        for (int b_digit : assigned_b_digits) {
-            for (int y_digit = 0; y_digit <= 9; ++y_digit) {
-                if (y_digit == 0 && b_digit == 0) continue;
-                if (y_digit * b_digit >= 100) continue;
-                // The term for k=0 is always 0, so directly proceed to the next recursive layer
-                _solve(1, y_digit, b_digit, 0, context);
+    void run(int requested_threads, Results& results) const {
+        struct Job {
+            Digits units;
+            Results results;
+        };
+        std::vector<Job> jobs;
+        for (int b = 9; b >= 0 && Integer(10 - b) <= max_gap_; --b) {
+            for (int y = 0; y < 10; ++y) {
+                if (y != 0 || b != 0) {
+                    jobs.push_back({{y, b}, {}});
+                }
             }
         }
 
-        // Add thread's results to the final results
-        std::lock_guard<std::mutex> lock(results_mutex);
-        final_results.insert(final_results.end(), context.found_pairs.begin(), context.found_pairs.end());
+        const auto worker_count = std::min(static_cast<std::size_t>(requested_threads), jobs.size());
+        std::atomic<std::size_t> next_job{0};
+        const auto worker = [&] {
+            for (auto index = next_job.fetch_add(1, std::memory_order_relaxed);
+                 index < jobs.size();
+                 index = next_job.fetch_add(1, std::memory_order_relaxed)) {
+                auto& job = jobs[index];
+                const auto [y, b] = job.units;
+                search(1, Integer(y), Integer(10 - b), Integer(0),
+                       trailing_zeros_.empty() && y * b >= 10,
+                       digit_choices[y][b], job.results);
+            }
         };
 
-    // Launch threads
-    for (int i = 0; i < num_threads; ++i) {
-        if (!work_distribution[i].empty()) {
-            threads.emplace_back(worker, work_distribution[i]);
+        std::vector<std::thread> threads;
+        threads.reserve(worker_count);
+        for (std::size_t i = 1; i < worker_count; ++i) {
+            try {
+                threads.emplace_back(worker);
+            } catch (const std::system_error&) {
+                // The existing workers can finish the same queue with fewer threads.
+                break;
+            }
+        }
+        worker();
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        for (auto& job : jobs) {
+            results.append(std::move(job.results), display_limit_);
         }
     }
 
-    // Wait for all threads to finish
-    for (auto& t : threads) {
-        t.join();
+private:
+    void search(int k, const Integer& y, const Integer& gap, const Integer& carry,
+                bool unpadded, const DigitChoices& choices, Results& results) const {
+        if (k == digits_) {
+            finish(y, gap, carry, unpadded, results);
+            return;
+        }
+
+        // gap is the smallest possible 10^m - B for the chosen low digits of B.
+        const Integer& place = powers_[k];
+        const Integer b = place - gap;
+        const auto residue = static_cast<unsigned>(carry % 10);
+        for (const auto [y_digit, b_digit] : choices[residue]) {
+            const Integer next_gap = gap + (9 - b_digit) * place;
+            if (next_gap > max_gap_) {
+                break;
+            }
+
+            // The diagonal product cancels. Only the new cross terms change the carry.
+            const Integer next_carry = (carry + y_digit * b + b_digit * y) / 10;
+            const Integer next_y = y + y_digit * place;
+            search(k + 1, next_y, next_gap, next_carry,
+                   unpadded && y_digit * b_digit >= 10, choices, results);
+        }
     }
 
-    std::cout << "Found " << final_results.size() << " sets of primitive solutions." << std::endl;
-    return final_results;
-}
+    void finish(const Integer& y, const Integer& gap, const Integer& carry,
+                bool unpadded, Results& results) const {
+        // The fixed-width equality is carry = x * (10^m - B).
+        if (carry < min_prefix_ * gap || carry % gap != 0) {
+            return;
+        }
+        const Integer prefix = carry / gap;
+        if (prefix >= max_prefix_) {
+            return;
+        }
 
-
-void _solve(int k, int_type y, int_type b, int_type carry, Context& context) {
-    if (k == context.m) {
-        _final_verification(y, b, context);
-        return;
-    }
-    int_type power_of_10_k = context.powers_of_10[k];
-    for (int b_digit = 0; b_digit <= 9; ++b_digit) {
-        if (k == context.m - 1 && b_digit == 0) continue;
-        for (int y_digit = 0; y_digit <= 9; ++y_digit) {
-            if (y_digit * b_digit >= 100) continue;
-            int_type term = carry + y_digit * b + b_digit * y;
-            if (term % 10 == 0) {
-                _solve(k + 1, y + y_digit * power_of_10_k, b + b_digit * power_of_10_k, term / 10, context);
+        ++results.padded_count;
+        const bool show_padded = results.padded.size() < display_limit_;
+        if (show_padded || unpadded) {
+            std::string suffix = decimal(y);
+            suffix.insert(0, digits_ - suffix.size(), '0');
+            const Integer b = powers_.back() - gap;
+            Factors factors{decimal(prefix) + suffix + trailing_zeros_,
+                            decimal(b) + trailing_zeros_};
+            if (unpadded) {
+                results.unpadded.push_back(factors);
+            }
+            if (show_padded) {
+                results.padded.push_back(std::move(factors));
             }
         }
     }
-}
 
-void _final_verification(int_type y_val, int_type b_val, Context& context) {
-    int m = context.m;
-    int_type denominator = context.power_of_10_2m - (b_val * context.power_of_10_m);
-    if (denominator <= 0) return; // Denominator check
+    int digits_;
+    std::vector<Integer> powers_;
+    std::string trailing_zeros_;
+    std::size_t display_limit_;
+    Integer min_prefix_, max_prefix_, max_gap_;
+};
 
-    // Range estimation check
-    int_type temp_b = b_val;
-    int_type p_low_max_for_b = 0;
-    for (int i = 0; i < m; ++i) {
-        p_low_max_for_b += 9 * (temp_b % 10) * context.powers_of_10[2 * i];
-        temp_b /= 10;
-    }
-
-    int_type y_min_bound = 0;
-    int_type y_max_bound = context.power_of_10_m;
-    if (b_val != 0) {
-        y_min_bound = (context.x_min * denominator) / b_val;
-        y_max_bound = (context.x_max * denominator + p_low_max_for_b) / b_val;
-    }
-
-    if (y_val < y_min_bound || y_val > y_max_bound) return;
-
-
-    int_type p_low = 0;
-    int_type temp_y_p = y_val;
-    int_type temp_b_p = b_val;
-    for (int i = 0; i < m; ++i) {
-        int_type y_digit = (temp_y_p / context.powers_of_10[m - 1 - i]) % 10;
-        int_type b_digit = (temp_b_p / context.powers_of_10[m - 1 - i]) % 10;
-        p_low += y_digit * b_digit * context.powers_of_10[2 * (m - 1 - i)];
-    }
-
-    int_type numerator = y_val * b_val - p_low;
-    if (numerator > 0 && numerator % denominator == 0) {
-        int_type x_val = numerator / denominator;
-        if (x_val >= context.x_min && x_val < context.x_max) {
-            context.found_pairs.push_back({ x_val * context.power_of_10_m + y_val, b_val });
+BigInt power_of_ten(int exponent) {
+    BigInt result = 1;
+    BigInt base = 10;
+    while (exponent > 0) {
+        if (exponent % 2 != 0) {
+            result *= base;
+        }
+        exponent /= 2;
+        if (exponent > 0) {
+            base *= base;
         }
     }
+    return result;
 }
 
+void print_factors(const std::vector<Factors>& factors) {
+    for (const auto& [a, b] : factors) {
+        std::cout << "A = " << a << ", B = " << b << '\n';
+    }
+}
 
-int main() {
-    int n_target, m_target, num_threads;
+} // namespace
 
+int main(int argc, char* argv[]) {
+    const bool show_all = argc == 2 && std::string_view(argv[1]) == "--all";
+    if (argc != 1 && !show_all) {
+        std::cerr << "Usage: " << argv[0] << " [--all]\n";
+        return 1;
+    }
+
+    int n, m, num_threads;
     std::cout << "Please enter the number of digits for the first factor (n): ";
-    std::cin >> n_target;
+    if (!(std::cin >> n)) {
+        std::cerr << "Expected an integer for n.\n";
+        return 1;
+    }
     std::cout << "Please enter the number of digits for the second factor (m, n > m): ";
-    std::cin >> m_target;
+    if (!(std::cin >> m) || m < 1 || n <= m) {
+        std::cerr << "Expected digit counts with n > m >= 1.\n";
+        return 1;
+    }
     std::cout << "Please enter the number of threads to use: ";
-    std::cin >> num_threads;
-
-    if (num_threads <= 0) {
-        num_threads = 1;
+    if (!(std::cin >> num_threads)) {
+        std::cerr << "Expected an integer for the thread count.\n";
+        return 1;
     }
+    num_threads = std::max(1, num_threads);
 
-    std::cout << "\nStarting to compute all coincidence multiplication solutions for n=" << n_target << ", m=" << m_target << std::endl;
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    std::vector<std::pair<int_type, int_type>> all_solutions;
-
-    for (int m_current = m_target; m_current >= 1; --m_current) {
-        int n_current = n_target - (m_target - m_current);
-        if (n_current <= m_current) break;
-
-        std::vector<std::pair<int_type, int_type>> primitives = find_primitive_solutions_parallel(n_current, m_current, num_threads);
-
-        int_type scale_factor = 1;
-        if (m_target - m_current > 0) {
-            scale_factor = static_cast<int_type>(pow(10, m_target - m_current));
-        }
-
-        for (size_t i = 0; i < primitives.size(); ++i) {
-            all_solutions.push_back({ primitives[i].first * scale_factor, primitives[i].second * scale_factor });
+    const auto display_limit = show_all ? std::numeric_limits<std::size_t>::max() : 1000;
+    const int prefix_digits = n - m;
+    const auto start = std::chrono::steady_clock::now();
+    Results results;
+    std::cout << "\nSearching for n=" << n << ", m=" << m << "..." << std::endl;
+    // A common trailing zero can be removed from both factors and adds "00" to
+    // the fixed-width product when restored. Cross terms vanish for m = 1.
+    for (int digits = m; digits >= std::max(2, prefix_digits); --digits) {
+        // Each carry update is smaller than 19 * 10^(digits - 1).
+        if (digits <= 18) {
+            PaddedSearch<std::uint64_t>(digits, prefix_digits, m - digits, display_limit)
+                .run(num_threads, results);
+        } else {
+            PaddedSearch<BigInt>(digits, prefix_digits, m - digits, display_limit)
+                .run(num_threads, results);
         }
     }
+    const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end_time - start_time;
-
-    std::cout << "\nDisplaying partial solutions" << std::endl;
-    size_t num_to_print = 1000;
-    for (size_t i = 0; i < std::min(all_solutions.size(), num_to_print); ++i) {
-        std::cout << "A = " << all_solutions[i].first << ", B = " << all_solutions[i].second << std::endl;
+    std::cout << "\nFixed-width solutions";
+    if (results.padded_count > results.padded.size()) {
+        std::cout << " (first " << results.padded.size() << ')';
     }
+    std::cout << ":\n";
+    print_factors(results.padded);
+    std::cout << "Fixed-width total: " << results.padded_count << '\n';
 
-    // Check if the solutions satisfy the no-zero-padding rule
-    std::cout << "\n\nSolutions that satisfy the no-zero-padding rule:" << std::endl;
-    int dual_rule_count = 0;
-    for (size_t i = 0; i < all_solutions.size(); ++i) {
-        int_type a = all_solutions[i].first;
-        int_type b = all_solutions[i].second;
-
-        int_type true_product = a * b;
-
-        // Convert numbers to strings to process each digit
-        std::stringstream ss_a, ss_b;
-        ss_a << a;
-        ss_b << b;
-        std::string s_a = ss_a.str();
-        std::string s_b = ss_b.str();
-
-        // Pad with leading zeros to match target digit counts
-        if (s_a.length() < (size_t)n_target) s_a.insert(0, n_target - s_a.length(), '0');
-        if (s_b.length() < (size_t)m_target) s_b.insert(0, m_target - s_b.length(), '0');
-
-
-        // Construct the coincidence product string according to the new rule
-        std::stringstream ss_pc_new;
-        if (n_target > m_target) {
-            ss_pc_new << s_a.substr(0, n_target - m_target);
-        }
-
-        for (int j = 0; j < m_target; ++j) {
-            int y_digit = s_a[n_target - m_target + j] - '0';
-            int b_digit = s_b[j] - '0';
-            int prod = y_digit * b_digit;
-            ss_pc_new << prod; // No zero padding
-        }
-        std::string s_pc_new_str = ss_pc_new.str();
-
-        // Convert the new coincidence product string to a numerical value
-        int_type pc_val_new;
-        std::stringstream ss_pc_val(s_pc_new_str);
-        ss_pc_val >> pc_val_new;
-
-        // Check for equality
-        if (true_product == pc_val_new) {
-            dual_rule_count++;
-            std::cout << "    A = " << a << ", B = " << b << std::endl;
+    std::cout << "\nSolutions without zero padding:\n";
+    print_factors(results.unpadded);
+    BigInt unpadded_count = results.unpadded.size();
+    // A shorter suffix can only match when m = 1 and B = 1.
+    if (m == 1) {
+        const BigInt first = power_of_ten(n - 1);
+        const BigInt last = first * 10 - 1;
+        unpadded_count = last - first + 1;
+        if (show_all) {
+            for (BigInt a = first; a <= last; ++a) {
+                std::cout << "A = " << a << ", B = 1\n";
+            }
+        } else {
+            std::cout << "A in [" << first << ", " << last << "], B = 1\n";
         }
     }
-    std::cout << "Verification completed. Found a total of " << dual_rule_count << " special solutions." << std::endl;
-
-    std::cout << "\n\nSearch completed." << std::endl;
-    std::cout << "Total time: " << elapsed.count() << " seconds." << std::endl;
-    std::cout << "Found a total of " << all_solutions.size() << " solution groups." << std::endl;
-
+    std::cout << "No-padding total: " << unpadded_count << '\n';
+    std::cout << "\nSearch time: " << elapsed.count() << " seconds.\n";
     std::cout << "\nPress Enter to exit..." << std::endl;
-    std::cin.ignore();
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     std::cin.get();
-
-    return 0;
 }
